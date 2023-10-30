@@ -1,0 +1,363 @@
+---
+title: "Untitled"
+author: "José Fernando Zea"
+date: "2023-10-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(TeachingSampling)
+library(sampling)
+library(ggplot2)
+```
+
+
+```{r}
+data(BigCity)
+```
+
+# Selección de unidades primarias de muestreo
+
+Sacamos una muestra de 329 (20%) UPMS de las 1644, repartimos por estrato el número de UPMS:
+
+```{r}
+df_ConteoUpmXestrato <- BigCity %>% group_by(Stratum, PSU) %>% count() %>% select(-n) %>%
+          ungroup() %>% group_by(Stratum) %>% count(name = "N_upm") %>% ungroup()
+df_ConteoUpmXestrato$n_upm <- ceiling(329 * df_ConteoUpmXestrato$N_upm / sum(df_ConteoUpmXestrato$N_upm))
+df_ConteoUpmXestrato$n_upm <- ifelse(df_ConteoUpmXestrato$n_upm == 1, 2, df_ConteoUpmXestrato$n_upm)
+```
+
+El tamño de muestra de UPMS resultante es 391.
+
+
+Generamos el marco de UPMS:
+
+```{r}
+df_marco <- BigCity %>% group_by(Stratum, PSU) %>% count() %>% select(-n)
+df_marco <- df_marco %>% left_join(df_ConteoUpmXestrato, by = "Stratum")
+```
+
+Organizar el estrato:
+
+```{r}
+df_marco <- df_marco %>% arrange(Stratum)
+df_ConteoUpmXestrato <- df_ConteoUpmXestrato %>% arrange(Stratum)
+n_I <- df_ConteoUpmXestrato$n_upm
+```
+
+
+Seleccionamos la muestra del marco:
+
+```{r}
+names(df_marco)[names(df_marco) == "Stratum"] <- "Estrato"
+set.seed(12345)
+proc_estratificacion <- sampling::strata(df_marco, stratanames = "Estrato", size = n_I, method = "srswor",
+                 description = F)
+```
+
+```{r}
+muestra_marco <- getdata(df_marco, proc_estratificacion)
+muestra_marco$ID_unit <- NULL
+muestra_marco$Stratum <- NULL
+muestra_marco <- muestra_marco %>% relocate(Estrato)
+names(muestra_marco)[names(muestra_marco) == "Prob"] <- "Pi_Ii"
+names(muestra_marco)[names(muestra_marco) == "Estrato"] <- "Stratum"
+
+```
+
+
+# Selección de unidades secundarias de muestreo
+
+```{r}
+df_marcoHogares_BigCity <- right_join(BigCity, muestra_marco, by = c("Stratum", "PSU"))
+df_marcoHogares_BigCity <- df_marcoHogares_BigCity %>% group_by(Stratum, PSU, HHID) %>%
+  summarise(N_upm  = max(N_upm), n_upm = max(n_upm), Pi_Ii = max(Pi_Ii))
+```
+
+
+Consultamos el número de hogares en la UPM:
+
+```{r}
+consulta_NumHog <- df_marcoHogares_BigCity %>% group_by(Stratum, PSU) %>% count(name = "N_i") %>% 
+                   arrange(PSU)
+consulta_NumHog$n_i <- ifelse(consulta_NumHog$N_i < 5, consulta_NumHog$N_i, 5)
+n_hog <- consulta_NumHog$n_i
+```
+
+
+Selecciono 5 hogares por UPM (salvo que haya menos de 5 horares en la UPM):
+
+
+```{r}
+df_marcoHogares_BigCity <- df_marcoHogares_BigCity %>% arrange(PSU)
+```
+
+```{r}
+set.seed(12345)
+proc_estratificacion2 <- sampling::strata(df_marcoHogares_BigCity, 
+                                         stratanames = "PSU", size = n_hog, 
+                                         method = "srswor",
+                                         description = F)
+```
+
+
+```{r}
+names(df_marcoHogares_BigCity)[names(df_marcoHogares_BigCity) == "Stratum"] <- "Estrato_UPM"
+
+muestra_hogares <- getdata(df_marcoHogares_BigCity, proc_estratificacion2)
+muestra_hogares$ID_unit  <- NULL
+muestra_hogares$Stratum  <- NULL
+
+names(muestra_hogares)[names(muestra_hogares) == "Prob"] <- "Pi_ki"
+```
+
+
+
+```{r}
+muestra_hogares <- muestra_hogares %>% left_join(consulta_NumHog, by = "PSU")
+muestra_hogares$ID_unit <- NULL
+muestra_hogares$Stratum <- NULL
+```
+
+
+```{r}
+muestra_hogares$pi_k <- muestra_hogares$Pi_Ii *  muestra_hogares$Pi_ki
+```
+
+
+```{r}
+sum(1/muestra_hogares$pi_k)
+```
+
+Vamos a simular algunas viviendas desocupadas en las cuales no se peude determinar la elegibilidad:
+
+```{r}
+set.seed(12345)
+muestra_hogares$vivienda_desocupada <- rbinom(n = nrow(muestra_hogares), size = 1, prob = 0.07)
+```
+
+
+Vamos a simular las unidades no elegibles (ineligible), en este caso vivienda que eran ocupadas y ahora son establecimientos comerciales:
+
+```{r}
+n_inelegibles <- sum(muestra_hogares$vivienda_desocupada == 0)
+set.seed(12345)
+muestra_hogares$vivienda_uso_comercial[muestra_hogares$vivienda_desocupada == 0] <- 
+  rbinom(n = n_inelegibles, size = 1, prob = 0.1)
+muestra_hogares$vivienda_uso_comercial <- ifelse(muestra_hogares$vivienda_uso_comercial %>% is.na(), 0,
+                                                 muestra_hogares$vivienda_uso_comercial)
+
+```
+
+
+
+
+
+Integramos a la tabla de BigCity para generar la muestra definitiva:
+
+
+```{r}
+muestra <- BigCity %>% right_join(muestra_hogares, by = c("HHID", "PSU"))
+```
+
+
+
+# Simulación de variables de no respuesta
+
+Simularemos la no respuesta en unidades elegibles:
+
+```{r}
+muestra_hogares_elegibles <- muestra_hogares %>% 
+                             filter(vivienda_desocupada == 0 & vivienda_uso_comercial == 0) %>%
+                             select(HHID)
+
+temp_muestra <- muestra %>% select(HHID, Zone, Expenditure)
+temp_muestra <- temp_muestra[!duplicated(temp_muestra$HHID),]
+muestra_hogares_elegibles <- muestra_hogares_elegibles %>% left_join(temp_muestra, by = "HHID")
+```
+
+
+
+```{r}
+muestra_hogares_elegibles$non_response_prob  <- 1 / (1 + exp(-(-0.007 * muestra_hogares_elegibles$Expenditure - 1 *
+                                          (muestra_hogares_elegibles$Zone  == "Rural"))))
+set.seed(12345)
+muestra_hogares_elegibles$non_response <- rbinom(n = nrow(muestra_hogares_elegibles), size = 1, prob = muestra_hogares_elegibles$non_response_prob)
+```
+
+```{r}
+names(muestra_hogares_elegibles)[names(muestra_hogares_elegibles) == "non_response_prob"] <- 
+  "non_response_prob_hogar"
+names(muestra_hogares_elegibles)[names(muestra_hogares_elegibles) == "non_response"] <- "non_response_hogar" 
+
+```
+
+
+```{r}
+table(muestra_hogares_elegibles$non_response_hogar) %>% proportions()
+library(ggplot2)
+ggplot2::ggplot(data = muestra_hogares_elegibles, aes(x = Expenditure, color = factor(non_response_hogar) )) + 
+  geom_density()
+muestra_hogares_elegibles %>% group_by(non_response_hogar) %>% summarise(mean(Expenditure))
+table(muestra_hogares_elegibles$Zone, muestra_hogares_elegibles$non_response_hogar)
+       
+```
+
+
+
+```{r}
+
+#names(muestra_hogares_elegibles)[names(muestra_hogares_elegibles) == "non_response"] <- "non_response_hogar" 
+muestra_hogares_elegibles <- muestra_hogares_elegibles %>% select(-Zone, -Expenditure)
+```
+
+
+Integramos la información de no respuesta de hogares:
+
+```{r}
+muestra_hogares <- muestra_hogares %>% left_join(muestra_hogares_elegibles, by = "HHID")
+```
+
+
+
+Simulamos la no respuesta a nivel de persona para desocupación (tener en cuenta el filtro), no simular con la variable respuesta.
+
+
+```{r}
+# Simulate non-response with more non-response for Employed
+muestra$non_response_prob_unemployed <- 1 / (1 + exp(-(-0.05 * muestra$Age - 0.1 * (muestra$Sex == "Female") - 
+                                  0.15 * (muestra$Employment == "Employed" & !is.na(muestra$Employment)))))
+
+# Create a binary non-response variable
+muestra$non_response_unemployed <- rbinom(n = nrow(muestra), size = 1, prob = muestra$non_response_prob_unemployed)
+```
+
+```{r}
+ggplot2::ggplot(data = muestra, aes(x = Age, color = factor(non_response_unemployed) )) + 
+  geom_density()
+muestra %>% group_by(non_response_unemployed) %>% summarise(mean(Age))
+table(muestra$Sex, muestra$non_response_unemployed)
+```
+
+
+
+
+```{r}
+muestra <- muestra %>% left_join(muestra_hogares %>% select(HHID , non_response_prob_hogar, non_response_hogar ),
+                                 by = "HHID")
+```
+
+ 
+ 
+ 
+# Ajustes de factores de expansión
+
+Hay tres tipos de unidades de las cuales si se conoce la elegibilidad 
+
+* ER: elegibles respondientes
+* ENR: elegibles no respodientes
+* IN: no elegibles
+
+Un cuarto tipo que son los que no puede no conozco la elegibildiad
+
+
+Por otro lado para undiades de elegibilidad desconocida (UKN) no se conoce con certeza si hace parte de la encuesta. Por ejemplo en una encuesta telefónica si no hay respuesta no se puede saber si el hogar corresponde al seleccionado en la muestra. EN la llamada de una persona de una asociación profesional se usa un marco antiguo y no se puede saber si las personas hacen parte o no de la asociación.
+
+Otro caso es si en el levantamiento del censo se determinaron viviendas ocupadas, pero a la hora del enlistamiento no se puede determinar si lo son puesto que no se encuentra  a nadie.
+
+## Factor de expansión básico
+
+
+```{r}
+muestra$d1k <- 1 / muestra$pi_k
+```
+
+
+
+## Ajuste por elegibilidad desconocida
+
+Calculamos el factor de ajuste de la elegibilidad desconocida, este factor lo haremos por cada uno de los estratos
+
+$$
+a_b = \frac{\sum_{s_{b}}d_{1k}}{\sum_{s_{b}\cup(S_{ER}\cap S_{ENR}\cup S_{IN})}d_{1k}} 
+
+$$
+
+Donde $d_{1k}$ corresponde a los pesos básicos. En $b$ se utiliza el estrato. Observe que en el denominador no incluye los de elegibilidad desconocida. El denominador incluye los elegibles respondientes $s_{ER}$, los elegibles no respondientes $s_{NER}$ y los no elegibles $s_{NER}$
+
+```{r}
+df_ajusteNoElegible <- muestra %>% group_by(Stratum) %>% 
+                       summarise(num_a_b= sum(d1k), denom_a_b = sum(d1k * (vivienda_desocupada == 0)),
+                                 a_b = num_a_b / denom_a_b) 
+```
+
+
+
+Una vez realizado el factor de ajuste se genera el factor de expansión ajustado por elegibilidad:
+
+
+```{r}
+muestra <- muestra %>% left_join(df_ajusteNoElegible %>% select(-num_a_b, -denom_a_b), by = "Stratum")
+muestra$d2k <-   muestra$d1k * muestra$a_b
+```
+
+
+
+# Descarte de las unidades no elegibles
+
+Para analizar las unidades no elegibles se utiliza la siguiente expresión :
+
+$$
+\begin{equation}
+d_{3k} = 
+\begin{cases}
+    0 & \text{if } k \in S_{UNK} \cup S_{IN}  \\
+    d_{2k} & \text{if } k \in S_{ER} \cup S_{ENR}
+\end{cases}
+\end{equation}
+$$
+
+
+
+```{r}
+muestra <- muestra %>% mutate(d3k = ifelse(vivienda_desocupada  == 1 | # Elegibilidad desconocida
+                                           vivienda_uso_comercial == 1,  # No elegible
+                                           0, d2k))
+```
+
+
+
+
+
+# Ajuste por no respuesta en el hogar
+
+```{r}
+df_ajustesFexpHogares <- muestra %>% group_by(HHID) %>%
+  summarise(Stratum = max(Stratum), PSU  = max(PSU), Zone = max(Zone), Expenditure = max(Expenditure),
+         vivienda_desocupada  = max(vivienda_desocupada ),
+         vivienda_uso_comercial = max(vivienda_uso_comercial),
+         pi_k  = max(pi_k), d1k = max(d1k), d2k = max(d2k), d3k = max(d3k),
+         non_response_hogar = max(non_response_hogar)) %>% 
+  filter(vivienda_desocupada  == 0 & vivienda_uso_comercial   == 0)
+```
+
+
+Ajustamos la regresión logística:
+
+```{r}
+modelo <- glm(non_response_hogar ~  Zone + Expenditure, data = df_ajustesFexpHogares, family = "binomial")
+```
+
+
+
+```{r}
+predict(modelo, df_ajustesFexpHogares, type = "response")
+```
+
+
