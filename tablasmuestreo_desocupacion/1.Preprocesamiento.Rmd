@@ -1,0 +1,228 @@
+---
+title: "Cálculo de tablas de muestreo"
+author: "José Fernando Zea"
+date: "2023-08-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+---
+title: "Ejercicio Panamá"
+author: "José Fernando Zea"
+date: "2023-07-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Cargamos los paquetes necesarios:
+
+```{r}
+library(dplyr) # Procesamiento de datos
+library(readr) # Exportar de csv
+library(readxl) # Exportar de excel
+library(haven) # Exportar de SPSS
+library(janitor) # Limieza de nombres
+library(samplesize4surveys) # Cálculo de tablas de muestreo
+library(srvyr) # Definición del diseño muestral survey
+```
+
+# Lectura de los datos
+
+Leemos la última encuesta de mercado laboral 2021:
+
+```{r}
+df_eml_2021oct <- read_spss("datos/Personaoctubre2021.sav")
+```
+
+Leemos los factores de expansión de la encuesta de mercado en el hogar:
+
+```{r}
+df_fexp <- read_excel("datos/Cobertura practica factores de expansión.xlsx",    
+                      sheet = "data")
+df_fexp <- clean_names(df_fexp)
+```
+
+
+Leemos el marco poblacional:
+
+```{r}
+df_marco <- read_excel("datos/Marco de UPM y Segmentos_EML_PM.xlsx", 
+                       sheet = "N-UPM-21,747 UNIFICADA")
+```
+
+
+
+# Preprocesamiento
+
+
+
+Construimos la columna de estrato para la tabla de factor de expansión:
+
+```{r}
+consulta_estrato <- df_fexp %>% mutate(provincia_fexp = substr(clave_de_upm, 1, 2)) %>% 
+  group_by(provincia_fexp, estrato, viviendas_particulares_del_dominio_censo_2010) %>%
+  count() %>% 
+  arrange(provincia_fexp, estrato) %>%
+  ungroup() %>% 
+  mutate(estrato_upm = 1:n()) %>% 
+  select(-n)
+```
+
+Integramos la tabla del factor de expansión con el estrato:
+
+```{r}
+df_fexp <- df_fexp %>% left_join(consulta_estrato, 
+            by = c("estrato", "viviendas_particulares_del_dominio_censo_2010"))
+```
+
+
+
+
+# Calculo de insumos tablas de muestreo provenientes del marco poblacional
+
+Calculamos los insumos necesarios del marco para poder calcular los tamaños de muestra, estos son 4 parámetros a nivel Nacional, por dominio y a nivel nacional:
+
+- Tamaño poblacional (N)
+- Número de UPMs (M)
+- Promedio de personas por hogar
+
+
+```{r}
+consulta_N_dominios <- df_marco %>% group_by(prov_id, prov) %>% 
+                       summarise(N = sum(c10pt)
+)
+consulta_N_nacional <- data.frame(prov_id = "00", 
+                                  prov = "NACIONAL", 
+                                  N = sum(df_marco$c10pt))
+consulta_N_dominios <- rbind(consulta_N_nacional, consulta_N_dominios)
+```
+
+censo: 3.662.000 me da 3.351.434
+
+
+Calculamos el número de UPM por dominio:
+
+```{r}
+consulta_M_dominios <- df_marco %>% 
+  group_by(prov_id, prov) %>% 
+  summarise(M = n_distinct(llave_con)
+)
+# unique(df_marco$llave_con) %>% length()
+consulta_M_nacional <- data.frame(prov_id = "00",
+                                  prov = "NACIONAL", 
+                                  M = sum(consulta_M_dominios$M))
+consulta_M_dominios <- rbind(consulta_M_nacional, consulta_M_dominios)
+```
+
+
+Consulta de promedio de personas por hogar:
+
+
+```{r}
+consulta_b_dominios <- df_marco %>% 
+  group_by(prov_id, prov) %>% 
+  summarise(N_pers= sum(c10pt), N_hog = sum(c10_hvpo)
+)
+consulta_b_nacional <- data.frame(prov_id  = "00", 
+                                  prov = "NACIONAL", 
+                                  N_pers = sum(df_marco$c10pt), N_hog = sum(df_marco$c10_hvpo))
+consulta_b_dominios <- rbind(consulta_b_nacional, consulta_b_dominios)
+consulta_b_dominios$b <- consulta_b_dominios$N_pers / consulta_b_dominios$N_hog
+```
+
+
+# Encuesta de mercado laboral
+
+Construimos la UPM:
+- Llave control (UPM): 01 01 01 01 001
+- 01: Provincia
+- 01: Distrito
+- 01: Corregimiento
+- 01: area (estrato/ESTRA)
+- 001: Número de la UPM (secuencia) ncontrol (en el marco)
+
+
+
+
+Construimos la UPM en la encuesta de mercado laboral:
+
+```{r}
+ df_eml_2021oct$UPM <- paste0(df_eml_2021oct$prov, df_eml_2021oct$dist, 
+                              df_eml_2021oct$corre,
+                              df_eml_2021oct$estra, df_eml_2021oct$unidad)
+```
+
+
+Según el INE de Panamá se realizaron recodificaciones en las UPMs por lo que no todas las UPMs de la encuesta coninciden con el marco.
+
+```{r}
+table(unique(df_eml_2021oct$UPM) %in% unique(df_marco$llave_con), useNA = "a")
+```
+
+
+# Integración de los Factores de expansión a la encuesta
+
+El 72% de los factores de expansión cruza:
+
+```{r}
+table(unique(df_eml_2021oct$UPM) %in% unique(df_fexp$clave_de_upm))
+table(unique(df_fexp$clave_de_upm) %in% unique(df_eml_2021oct$UPM))
+```
+
+Integramos los factores de expansión:
+
+```{r}
+# df_eml_2021oct2 <- left_join(df_eml_2021oct, 
+#                             df_fexp %>%  
+#                               select(-provincia, -dist,
+#                                      -corre, -AREA,-UPM ), 
+#                             by = c("UPM" = "clave_de_upm2"))
+
+df_eml_2021oct2 <- left_join(df_eml_2021oct, 
+                            df_fexp, 
+                            by = c("UPM" = "clave_de_upm"))
+```
+
+Podemos observar que las provincias de las comarcas del Comarca Guna Yala(10), Comarca Embera(11), Comarca Ngabe Bugle(12),  13 (Panamá oeste) y 03 (Colón) tienen muchos faltantes en la UPM:
+
+
+```{r}
+table(df_eml_2021oct2$prov, is.na(df_eml_2021oct2$pfinal), useNA = "a")
+```
+
+Logramos una buena completitud
+
+
+```{r}
+df_eml_2021oct_analisis <- df_eml_2021oct2 %>% 
+  mutate(PEA = ifelse(pea_nea == "PEA" & !is.na(pea_nea), 1, 0),
+                      ocupados = ifelse(ocu_des == "Ocupados" & !is.na(ocu_des), 1, 0),
+                      desocupados = ifelse(ocu_des == "Desocupados" & 
+                                             !is.na(ocu_des), 1, 0)
+         )
+df_eml_2021oct_analisis$ocupados <- ifelse(df_eml_2021oct_analisis$PEA == 0, NA, df_eml_2021oct_analisis$ocupados)
+
+df_eml_2021oct_analisis$desocupados <- ifelse(df_eml_2021oct_analisis$PEA == 0, NA, df_eml_2021oct_analisis$desocupados)
+```
+
+```{r}
+saveRDS(df_eml_2021oct_analisis, 
+        "output/1.Preprocesamiento/df_eml_2021oct_analisis.Rds")
+```
+
+```{r}
+saveRDS(consulta_N_dominios, "output/1.Preprocesamiento/consulta_N_dominios.Rds")
+saveRDS(consulta_M_dominios, "output/1.Preprocesamiento/consulta_M_dominios.Rds")
+saveRDS(consulta_b_dominios, "output/1.Preprocesamiento/consulta_b_dominios.Rds")
+```
+
+```{r}
+
+```
+
