@@ -1,0 +1,902 @@
+---
+title: "Pobreza"
+author: "José Fernando Zea"
+date: "2023-09-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(dplyr) # Procesamiento de datos
+library(readr) # Exportar de csv
+library(readxl) # Exportar de excel
+library(haven) # Exportar de SPSS
+library(foreign) # Exportar dbf
+library(glue)
+library(janitor) # Limieza de nombres
+library(samplesize4surveys) # Cálculo de tablas de muestreo
+library(srvyr) # Definición del diseño muestral survey
+```
+
+
+```{r}
+
+setwd("../data/EML_Octubre_2021")
+personas <- read.dbf("persona.dbf")
+#personas <- read_sav("Personaoctubre2021.sav")
+# personas <-  personas %>% mutate(id = glue("{LLAVE_SEC}_{HOGAR}_{NPER}"))
+```
+
+Tabla contiene el detalle para la UPM:
+
+```{r}
+df_eml_2021oct <- read_spss("Personaoctubre2021.sav")
+```
+
+Leemos los factores de expansión de la encuesta de mercado en el hogar:
+
+```{r}
+df_fexp <- read_excel("Cobertura practica factores de expansión.xlsx",    
+                      sheet = "data")
+df_fexp <- clean_names(df_fexp)
+```
+
+
+Leemos el marco poblacional:
+
+```{r}
+df_marco <- read_excel("Marco de UPM y Segmentos_EML_PM.xlsx", 
+                       sheet = "N-UPM-21,747 UNIFICADA")
+```
+
+
+
+
+
+```{r}
+consulta_estrato <- df_fexp %>% mutate(provincia_fexp = substr(clave_de_upm, 1, 2)) %>% 
+  group_by(provincia_fexp, estrato, viviendas_particulares_del_dominio_censo_2010) %>%
+  count() %>% 
+  arrange(provincia_fexp, estrato) %>%
+  ungroup() %>% 
+  mutate(estrato_upm = 1:n()) %>% 
+  select(-n)
+```
+
+Integramos la tabla del factor de expansión con el estrato:
+
+```{r}
+df_fexp <- df_fexp %>% left_join(consulta_estrato, 
+          by = c("estrato", "viviendas_particulares_del_dominio_censo_2010"))
+```
+
+
+
+Área urbana y rural: 
+
+```{r}
+table(personas$AREA)
+```
+
+
+
+# Calculo de insumos tablas de muestreo provenientes del marco poblacional
+
+Calculamos los insumos necesarios del marco para poder calcular los tamaños de muestra, estos son 4 parámetros a nivel Nacional, por dominio y a nivel nacional:
+
+- Tamaño poblacional (N)
+- Número de UPMs (M)
+- Promedio de personas por hogar
+
+
+```{r}
+consulta_N_dominios <- df_marco %>% group_by(prov_id, prov) %>% 
+                       summarise(N = sum(c10ht)
+)
+consulta_N_nacional <- data.frame(prov_id = "00", 
+                                  prov = "NACIONAL", 
+                                  N = sum(df_marco$c10ht))
+consulta_N_dominios <- rbind(consulta_N_nacional, consulta_N_dominios)
+```
+
+censo: 3.662.000 me da 3.351.434
+
+
+
+Calculamos el número de UPM por dominio:
+
+```{r}
+consulta_M_dominios <- df_marco %>% 
+  group_by(prov_id, prov) %>% 
+  summarise(M = n_distinct(llave_con)
+)
+# unique(df_marco$llave_con) %>% length()
+consulta_M_nacional <- data.frame(prov_id = "00",
+                                  prov = "NACIONAL", 
+                                  M = sum(consulta_M_dominios$M))
+consulta_M_dominios <- rbind(consulta_M_nacional, consulta_M_dominios)
+```
+
+
+Calculamos estos parámetros por área:
+
+```{r}
+consulta_N_area <- df_marco %>% group_by(area) %>% 
+                       summarise(N = sum(c10ht)
+)
+consulta_N_nacional2 <- data.frame(area = "00", 
+                                  N = sum(df_marco$c10ht))
+consulta_N_area <- rbind(consulta_N_nacional2, consulta_N_area)
+```
+
+
+```{r}
+consulta_M_area <- df_marco %>% 
+  group_by(area) %>% 
+  summarise(M = n_distinct(llave_con)
+)
+# unique(df_marco$llave_con) %>% length()
+consulta_M_nacional2 <- data.frame(area = "00", 
+                                  M = sum(consulta_M_area$M))
+
+consulta_M_area <- rbind(consulta_M_nacional2, 
+                                  consulta_M_area)
+```
+
+
+# Exploración de variables
+
+```{r}
+consulta_ingresos <- table(personas$P421, useNA = "a") %>% as.data.frame()
+consulta_ingresosEspecie <- table(personas$P422, useNA = "a") %>% as.data.frame()
+consulta_ingresosIndependiente <- table(personas$P423, useNA = "a") %>% as.data.frame()
+consulta_ingresosEspecieIndependiente <- table(personas$P424, useNA = "a") %>% as.data.frame()
+consulta_ingresosAutoconsumo <- table(personas$P425, useNA = "a") %>% as.data.frame()
+# 99999 99999
+consulta_SalarioOtroTrabajo <- table(personas$P49_SALARI, useNA = "a") %>% as.data.frame()
+
+consulta_jubilacion <- table(personas$P56_A, useNA = "a") %>% as.data.frame()
+consulta_pension <- table(personas$P56_B, useNA = "a") %>% as.data.frame()
+consulta_bolsaComida <- table(personas$P56_B11, useNA = "a") %>% as.data.frame()
+consulta_bonoSolidario <- table(personas$P56_B12, useNA = "a") %>% as.data.frame()
+consulta_ValeDigital <- table(personas$P56_B13, useNA = "a") %>% as.data.frame()
+```
+
+```{r}
+df_ingresos <- personas[c("LLAVE_SEC", "HOGAR", "NPER", "AREA",
+                          "P421", "P422", "P423",
+                          "P424", "P425", "P49_SALARI",
+                        "P56_A", "P56_B", 
+"P56_B11", "P56_B12", "P56_B13", "P56_C1", "P56_C2", "P56_C3", 
+"P56_C4", "P56_C5", "P56_C6", "P56_C7", "P56_C8", 
+"P56_D", "P56_E", "P56_F1", "P56_F2", "P56_F3", "P56_F4", "P56_G1", 
+"P56_G2", "P56_G3", "P56_G4", "P56_G5", "P56_G6", "P56_H", "P56_I", 
+"P56_K", "P56_L")]
+```
+
+
+Realizamos la imputación: 
+
+```{r}
+# Define the columns you want to impute
+columns_to_impute <- c("P421", "P422", "P423", "P424", "P425", "P49_SALARI",
+                        "P56_A", "P56_B", "P56_B11", "P56_B12", "P56_B13", "P56_C1",
+                        "P56_C2", "P56_C3", "P56_C4", "P56_C5", "P56_C6",
+                        "P56_C7", "P56_C8", "P56_D", "P56_E", "P56_F1", "P56_F2",
+                        "P56_F3", "P56_F4", "P56_G1", "P56_G2", "P56_G3", "P56_G4",
+                        "P56_G5", "P56_G6", "P56_H", "P56_I", "P56_K", "P56_L")
+
+# Impute missing values with the median and create new columns with "_imputed" suffix
+df_ingresos_imputed <- df_ingresos %>%
+  mutate(across(all_of(columns_to_impute),
+                ~ifelse(. == 99999, median(., na.rm = TRUE), .),
+                .names = "{.col}_imputed")) %>%
+  select(LLAVE_SEC, HOGAR,  NPER, AREA, ends_with("_imputed"))
+# Reconstruir ingreso por persona
+
+columnas_sel <- c("P421_imputed", "P422_imputed", 
+"P423_imputed", "P424_imputed", "P425_imputed", "P49_SALARI_imputed", 
+"P56_A_imputed", "P56_B_imputed", "P56_B11_imputed", "P56_B12_imputed", 
+"P56_B13_imputed", "P56_C1_imputed", "P56_C2_imputed", "P56_C3_imputed", 
+"P56_C4_imputed", "P56_C5_imputed", "P56_C6_imputed", 
+"P56_C7_imputed", "P56_C8_imputed", "P56_D_imputed", "P56_E_imputed", 
+"P56_F1_imputed", "P56_F2_imputed", "P56_F3_imputed", "P56_F4_imputed", 
+"P56_G1_imputed", "P56_G2_imputed", "P56_G3_imputed", "P56_G4_imputed", 
+"P56_G5_imputed", "P56_G6_imputed", "P56_H_imputed", "P56_I_imputed", 
+"P56_K_imputed", "P56_L_imputed")
+
+df_ingresos_imputed$INGRESO_TOTAL_PERSONA <- rowSums(df_ingresos_imputed[columnas_sel], 
+                                                     na.rm = TRUE)
+```
+
+Agregar a nivel de hogar:
+
+```{r}
+df_ingresos_imputed$AREA <- df_ingresos_imputed$AREA %>% as.character()
+df_ingresosHogar <- df_ingresos_imputed %>% group_by(LLAVE_SEC, HOGAR) %>% 
+  summarise(AREA = max(AREA), INGRESO_TOTAL_HOGAR = sum(INGRESO_TOTAL_PERSONA))
+```
+
+
+Calcular líneas de pobreza y linea de indigencia 2021:
+
+```{r}
+df_ingresosHogar$LP <- ifelse(df_ingresosHogar$AREA == "Urbana" &
+  df_ingresosHogar$INGRESO_TOTAL_HOGAR <= 527.5, 1,
+  ifelse(df_ingresosHogar$AREA == "Rural" &
+  df_ingresosHogar$INGRESO_TOTAL_HOGAR <= 484.8, 1,0))
+
+df_ingresosHogar$LI <- ifelse(df_ingresosHogar$AREA == "Urbana" &
+  df_ingresosHogar$INGRESO_TOTAL_HOGAR <= 259, 1,
+  ifelse(df_ingresosHogar$AREA == "Rural" &
+  df_ingresosHogar$INGRESO_TOTAL_HOGAR <= 231.2, 1,0))
+
+```
+
+
+```{r}
+table(df_ingresosHogar$LP) %>% proportions() * 100
+```
+
+
+```{r}
+table(df_ingresosHogar$LI) %>% proportions() * 100
+```
+
+# Encuesta de mercado laboral
+
+Construimos la UPM:
+- Llave control (UPM): 01 01 01 01 001
+- 01: Provincia
+- 01: Distrito
+- 01: Corregimiento
+- 01: area (estrato/ESTRA)
+- 001: Número de la UPM (secuencia) ncontrol (en el marco)
+
+
+
+
+Construimos la UPM en la encuesta de mercado laboral:
+
+```{r}
+df_eml_2021oct$UPM <- paste0(df_eml_2021oct$prov, df_eml_2021oct$dist, 
+                              df_eml_2021oct$corre,
+                              df_eml_2021oct$estra, df_eml_2021oct$unidad)
+```
+
+
+```{r}
+df_eml_2021oct2 <- left_join(df_eml_2021oct, 
+                            df_fexp, 
+                            by = c("UPM" = "clave_de_upm"))
+
+```
+
+
+```{r}
+table(df_eml_2021oct2$prov, is.na(df_eml_2021oct2$pfinal), useNA = "a")
+```
+
+
+# Conformación de la tabla final: 
+A la tabla de hogares agregarle la información UPM, estrato
+
+
+```{r}
+df_eml_2021oct2 <- df_eml_2021oct2 %>% select(
+c("D_R", "llave_sec", "provincia", "prov", "dist", "corre", "estra", 
+"unidad", "cuest", "hogar", "nper", "UPM", "estrato", 
+"viviendas_particulares_del_dominio_censo_2010", "viviendas_en_la_upm_inicial_censo_2010", 
+"upm_seleccionadas", "viviendas_a_seleccionar", "n_de_upm_con_al_menos_una_entrevista_en_el_estrato", 
+"p1_primera_etapa", "p2_segunda_etapa", "pfinal", "f1_primera_etapa", 
+"f2_segunda_etapa", "f_final", "provincia_fexp", "estrato_upm", "fac15_e"
+)
+)
+```
+
+
+Integramos las dos tablas:
+
+```{r}
+df_eml_2021oct2$IDhogar <- paste0(df_eml_2021oct2$llave_sec, "_", 
+                                  df_eml_2021oct2$hogar) 
+df_eml_2021oct3 <- df_eml_2021oct2[!duplicated(df_eml_2021oct2$IDhogar ),]
+```
+
+```{r}
+DF_HOGAR <- df_ingresosHogar%>% left_join(df_eml_2021oct3, 
+                                         by = c("LLAVE_SEC" = "llave_sec",
+                                                       "HOGAR" = "hogar"))
+```
+
+
+
+# Diseño de muestreo
+
+```{r}
+DF_HOGAR <- DF_HOGAR[!is.na(DF_HOGAR$fac15_e),]
+DF_HOGAR <- DF_HOGAR[!is.na(DF_HOGAR$estrato_upm),]
+
+```
+
+```{r}
+table(!is.na(DF_HOGAR$fac15_e))
+```
+
+Un insumo muy relevante para las tablas de muestreo es el promedio de hogares dentro de cada UPM:
+
+```{r}
+consulta_numVivXUpm <- DF_HOGAR %>% 
+                       group_by(UPM, cuest) %>% 
+                       count(name = "temp") %>% ungroup() %>%
+                       group_by(UPM) %>%
+                       count() %>% 
+                       ungroup() %>% summarise(promhogXupm = mean(n))
+consulta_numVivXUpm
+```
+
+Calculamos este indicador para la parte urbana y rural:
+
+```{r}
+consulta_numVivXUpm_urbano <- DF_HOGAR %>% filter(AREA == "Urbana") %>%
+                       group_by(UPM, cuest) %>% 
+                       count(name = "temp") %>% ungroup() %>%
+                       group_by(UPM) %>%
+                       count() %>% 
+                       ungroup() %>% summarise(promhogXupm = mean(n))
+consulta_numVivXUpm_urbano
+```
+
+
+Rural: 
+
+
+```{r}
+consulta_numVivXUpm_rural <- DF_HOGAR %>% filter(AREA == "Rural") %>%
+                       group_by(UPM, cuest) %>% 
+                       count(name = "temp") %>% ungroup() %>%
+                       group_by(UPM) %>%
+                       count() %>% 
+                       ungroup() %>% summarise(promhogXupm = mean(n))
+consulta_numVivXUpm_rural
+```
+
+
+EL número promedio de número de viviendas por UPM es 5.3
+
+
+
+Definimos el diseño muestral: 
+
+```{r}
+diseno_muestral <- DF_HOGAR %>%
+  as_survey_design(ids = UPM,  strata = estrato_upm,  weights = fac15_e)
+```
+
+
+
+# Parámetros de tablas de muestreo
+
+Calculamos un escenario nacional:
+
+```{r}
+df_LP_nnal<- diseno_muestral %>%
+  summarize(P = survey_mean(LP, na.rm = T, 
+                             vartype  = "se", deff = T)) 
+df_LP_nnal
+```
+
+
+Calculamos la proporción de pobreza por área:
+
+```{r}
+df_LP_area <- diseno_muestral %>% group_by(AREA) %>%
+  summarize(P = survey_mean(LP, na.rm = T, 
+                             vartype  = "se", deff = T)) 
+df_LP_area
+```
+
+Podemos calcular también la línea de pobreza por área:
+
+```{r}
+df_LP_prov <- diseno_muestral %>% group_by(prov) %>%
+  summarize(P = survey_mean(LP, na.rm = T, 
+                             vartype  = "se", deff = T)) 
+df_LP_prov
+```
+
+
+```{r}
+df_LI_nnal <- diseno_muestral  %>%
+  summarize(P = survey_mean(LI, na.rm = T, 
+                             vartype  = "se", deff = T)) 
+df_LI_nnal
+```
+
+
+```{r}
+df_LI_area <- diseno_muestral %>% group_by(AREA) %>%
+  summarize(P = survey_mean(LI, na.rm = T, 
+                             vartype  = "se", deff = T)) 
+df_LI_area
+```
+
+
+```{r}
+df_LI_prov <- diseno_muestral %>% group_by(prov) %>%
+  summarize(P = survey_mean(LI, na.rm = T, 
+                             vartype  = "se", deff = T)) 
+df_LI_prov
+```
+
+
+
+# Cálculo de tablas de muestreo algunos ejemplos
+
+Arrancamos con el escenario nacional, en primer lugar calculamos el coeficiente de correlación intraclásica, recordemos la relación entre el efecto diseño y el coeficiente de correlación intraclásica:
+
+$$
+deff = 1 + (n-1) \times \rho
+$$
+Despejando el $\rho$ (coeficiente de correlación intraclase):
+
+$$
+\rho = \frac{deff-1}{n-1}
+$$
+
+
+```{r}
+rho_LP_nacional <- (df_LP_nnal$P_deff - 1) /  (consulta_numVivXUpm - 1)
+rho_LP_nacional <- rho_LP_nacional$promhogXupm
+rho_LP_nacional
+```
+Otro de los temas relevantes a ingresar en la tabla de muestreo es el margen de error relativo, sin embargo definirlo es más sencillo partiendo del intervalo de cofianza, recordemos la proporción que estamos abordando:
+
+```{r}
+df_LP_nnal$P
+```
+Si se desea un intervalo de confianza con un margen de error de 0.02!!! (ancho de 0.04) esti implicaría un margen error relativo de:
+
+```{r}
+0.01 / 0.3321831 # margen error deseado / proporcion pobreza
+```
+y un coeficiente de variación del 3% aproximdadamente.
+
+
+
+```{r}
+ss4HHSp(N = consulta_N_area$N[1], 
+        M = consulta_M_area[1], 
+        r = 1, b = 1, 
+        rho = rho_LP_nacional, P = df_LP_nnal$P, 
+        delta = 0.03010388, conf = 0.95, m = 5:20)
+```
+
+
+
+## Cálculo de tablas de muestreo a nivel área
+
+
+## Urbano
+
+```{r}
+df_LP_area$P[df_LP_area$AREA == "Urbana"]
+```
+
+Calculamos el margen de error relativo: el cociente entre el margen de error "deseado" y la proporción observada:
+
+```{r}
+0.02 / df_LP_area$P[df_LP_area$AREA == "Urbana"]
+```
+
+
+```{r}
+rho_LP_urbano <- (df_LP_area$P_deff[2] - 1) /  (consulta_numVivXUpm_urbano - 1)
+rho_LP_urbano <- rho_LP_urbano$promhogXupm
+rho_LP_urbano
+```
+
+
+
+```{r}
+ss4HHSp(N = consulta_N_area$N[2], # Ver consulta_N_area y escoger Area urbana 
+        M = consulta_M_area[2], 
+        r = 1, b = 1, 
+        rho = rho_LP_urbano, P = df_LP_area$P[2], # Ver df_LP_area y tomar urbana 
+        delta = 0.07291674, conf = 0.95, m = 5:20)
+```
+
+Supongamos que queremos salvar este escenario con 6 encuestas:
+
+```{r}
+num_upm_urbano <- ss4HHSp(N = consulta_N_area$N[2], # Ver consulta_N_area y escoger Area urbana 
+        M = consulta_M_area[2], 
+        r = 1, b = 1, 
+        rho = rho_LP_urbano, P = df_LP_area$P[2], # Ver df_LP_area y tomar urbana 
+        delta = 0.07291674, conf = 0.95, m = 6) %>% filter(HouseholdsPerPSU == 6) %>% pull(PSUinSample)
+```
+
+
+
+
+## Rural
+
+Ejercicio INEC Panamá
+
+```{r}
+df_LP_area$P[df_LP_area$AREA == "Rural"]
+```
+}
+
+```{r}
+0.02 / df_LP_area$P[df_LP_area$AREA == "Rural"]
+```
+
+```{r}
+rho_LP_rural <- (df_LP_area$P_deff[1] - 1) /  (consulta_numVivXUpm_rural - 1)
+rho_LP_rural <- rho_LP_rural$promhogXupm
+rho_LP_rural
+```
+
+```{r}
+ss4HHSp(N = consulta_N_area$N[2] + consulta_N_area$N[3], 
+        M = consulta_M_area$M[2] + consulta_M_area$M[3], 
+        r = 1, b = 1, 
+        rho = rho_LP_rural, P = df_LP_area$P[1], # Ver df_LP_area y tomar urbana 
+        delta = 0.04047392, conf = 0.95, m = 5:20)
+```
+
+Supongamos que queremos salvar el escenario con 12 encuestas:
+
+
+```{r}
+num_upm_rural <- ss4HHSp(N = consulta_N_area$N[2] + consulta_N_area$N[3], 
+        M = consulta_M_area$M[2] + consulta_M_area$M[3], 
+        r = 1, b = 1, 
+        rho = rho_LP_rural, P = df_LP_area$P[1], # Ver df_LP_area y tomar urbana 
+        delta = 0.04047392, conf = 0.95, m = 5:20) %>% filter(HouseholdsPerPSU == 12) %>% pull(PSUinSample)
+num_upm_rural
+```
+
+Esto implicaría realizar en el país el siguiente número de UPMS:
+
+```{r}
+num_upm_urbano + num_upm_rural
+```
+
+Par aun total de hogares:
+
+```{r}
+num_upm_urbano * 6 + num_upm_rural * 12
+```
+
+Sin embargo sabemos que una mejor variable trazadora es la pobreza extrema que es más exigente en tamaño de muestra y además es mejor partir de los escenarios regionales, explicamos a continuación algunos escenarios a nivel regional, Dado que son muchos escenarios calculemos al tiempo para un margen de error relativo común que satisfaga los intervalos de confianza. Dado que por región varía la proporción de pobreza y podría también quererse diferentes errores estándar y anchos de intervalos de confianza, revisemos las proporciones y analicemos algunos margenes de error, Revisemos las proporciones de pobreza y revisemos margenes de error.
+
+```{r}
+df_LP_prov
+```
+
+Analizamos los intervalos de confianza generado y calculemos los margenes de error relativos que se generan para elegir un nivel de precisión existentes actualmente en la encuesta:
+
+
+```{r}
+conf <- 0.95
+alpha <- 1- conf
+z <- qnorm(1-alpha/2)
+df_LP_prov$me <- z * df_LP_prov$P_se
+
+df_LP_prov$LI <- df_LP_prov$P - df_LP_prov$me
+df_LP_prov$LS <- df_LP_prov$P + df_LP_prov$me
+df_LP_prov$mer <- df_LP_prov$P_se / df_LP_prov$P
+```
+
+Observemos que algunas regiones quedan muy mal representados y observemos como la previsión de la provincia 1 pueden ser aceptables. Observe también que pese a que las provincias 1 y 2 tienen margenes de error relativos similares el intervalo de confianza para la provincia 4 parece excesivamente grande.
+
+
+# Tamao de muestra por provincia
+
+
+SUpongamos que queremos garantizar un margen de error del 5% para todoas las provincias calcularemos como lucirían los intervalos y margenes de error relativos:
+
+```{r}
+df_LP_prov$me_deseado <- 0.03
+df_LP_prov$LI_deseado <- df_LP_prov$P - df_LP_prov$me_deseado
+df_LP_prov$LS_deseado <- df_LP_prov$P + df_LP_prov$me_deseado
+df_LP_prov$mer_deseado <- (df_LP_prov$me_deseado) / df_LP_prov$P
+df_LP_prov
+```
+
+También calculamos la proporción urbana rural en cada provincia:
+
+```{r}
+consulta_urbanoRural <- df_marco %>% mutate(area_recod = ifelse(area %in% c("02", "03"), "Rural", "Urbano")) %>% 
+  group_by(prov_id, prov, area_recod) %>% count() %>% ungroup() %>% group_by(prov_id) %>%
+  mutate(prop_area = n / sum(n))
+consulta_urbanoRural <- reshape2::dcast(data = consulta_urbanoRural, prov_id ~ area_recod, value.var = "prop_area")
+consulta_urbanoRural$Urbano <- ifelse(is.na(consulta_urbanoRural$Urbano), 0, consulta_urbanoRural$Urbano)
+consulta_urbanoRural$Rural <- ifelse(is.na(consulta_urbanoRural$Rural ), 0, consulta_urbanoRural$Rural)
+
+df_LP_prov <- df_LP_prov %>% left_join(consulta_urbanoRural, by = c("prov" = "prov_id"))
+df_LP_prov$n_aprox <- df_LP_prov$Urbano * 6 + df_LP_prov$Rural * 12
+df_LP_prov
+```
+
+
+
+Calculamos el número de hogares (N) y UPMs por provincia, esto servirá de insumo para el cálculo de tamaño de muestra para cada una de las provincias.
+
+```{r}
+consulta_N_prov <- df_marco %>% group_by(prov_id) %>% 
+                    summarise(N = sum(c10ht)
+)
+
+consulta_M_prov <- df_marco %>% 
+  group_by(prov_id) %>% 
+  summarise(M = n_distinct(llave_con)
+)
+```
+
+
+Calculamos también el número de viviendas por UPM para cada una de las provincias:
+
+```{r}
+consulta_numVivXUpm_prov <- DF_HOGAR %>% 
+  group_by(UPM, cuest, prov) %>% 
+  count(name = "temp") %>% ungroup() %>%
+  group_by(prov, UPM) %>%
+  count() %>% 
+  ungroup() %>% 
+  group_by(prov) %>%
+  summarise(promhogXupm = mean(n))
+consulta_numVivXUpm_prov <- consulta_numVivXUpm_prov %>%  ungroup() %>% select(prov, promhogXupm)
+```
+
+
+
+
+# Tamaño de muestra para provincias rurales
+
+Calculamos el tamaño de muestra de las provincias rurales
+
+```{r}
+df_LP_provRurales <- df_LP_prov %>% filter(prov %in% c("05", "07", "10", "11", "12"))
+```
+
+Agregarle el número de Hogares (N), UPMs (M) y coeficiente de correlación intraclásica, arrancamos por los cálculos de N y M:
+
+
+Se lo integramos a los insumos de la tabla de muestreo:
+
+```{r}
+df_LP_provRurales <- df_LP_provRurales %>% left_join(consulta_N_prov, by = c("prov" = "prov_id"))
+df_LP_provRurales <- df_LP_provRurales %>% left_join(consulta_M_prov, by = c("prov" = "prov_id"))
+```
+
+
+Ahora calculamos los insumos para la correlación intraclase y se lo integramos a los insumos de las tablas de muestreo:
+
+```{r}
+
+df_LP_provRurales <- df_LP_provRurales %>% 
+  left_join(consulta_numVivXUpm_prov, by = "prov")
+
+df_LP_provRurales$rho_LP <- (df_LP_provRurales$P_deff[1] - 1) /  (df_LP_provRurales$promhogXupm - 1)
+df_LP_provRurales
+```
+
+El número de viviendas por UPM:
+```{r}
+df_LP_provRurales$nvivXUPM <- ifelse(df_LP_provRurales$prov %in% c("05", "07"), 8, 16) # Efectivas
+```
+
+
+Ya con los insumos podemos proceder a calcular el tamaño de muestra para estas regiones:
+
+```{r}
+ls_tamMue_provRurales <- vector(mode = "list", length = nrow(df_LP_provRurales))
+# Calculo por área
+for(i in 1:nrow(df_LP_provRurales)){
+temp1 <- ss4HHSp(N = df_LP_provRurales$N[i] , 
+        M = df_LP_provRurales$M[i], 
+        r = 1, b = 1, 
+        rho = df_LP_provRurales$rho_LP[i], P = df_LP_provRurales$P[i], # Ver df_LP_area y tomar urbana 
+        delta = df_LP_provRurales$mer_deseado[i], conf = 0.95, m = df_LP_provRurales$nvivXUPM[i]) %>%
+  mutate(prov  = df_LP_provRurales$prov[i]) %>% ungroup() 
+ls_tamMue_provRurales[[i]] <- temp1
+}
+df_tamMue_provRurales <- bind_rows(ls_tamMue_provRurales)
+```
+
+Agregamos por región estas provincias:
+
+```{r}
+df_tamMue_provRurales <- df_tamMue_provRurales %>% select(prov, PSUinSample, HouseholdsInSample)
+```
+
+
+
+
+# Tamaño de muestra para provincias urbanas
+
+
+Calculamos el tamaño de muestra de las provincias urbanas
+
+```{r}
+df_LP_provUrbanas <- df_LP_prov %>% filter(prov %in% c("08"))
+```
+
+Agregarle el número de Hogares (N), UPMs (M) y coeficiente de correlación intraclásica, arrancamos por los cálculos de N y M:
+
+
+Se lo integramos a los insumos de la tabla de muestreo:
+
+```{r}
+df_LP_provUrbanas <- df_LP_provUrbanas %>% left_join(consulta_N_prov, by = c("prov" = "prov_id"))
+df_LP_provUrbanas <- df_LP_provUrbanas %>% left_join(consulta_M_prov, by = c("prov" = "prov_id"))
+```
+
+
+Ahora calculamos los insumos para la correlación intraclase y se lo integramos a los insumos de las tablas de muestreo:
+
+```{r}
+df_LP_provUrbanas <- df_LP_provUrbanas %>% 
+  left_join(consulta_numVivXUpm_prov, by = "prov")
+
+df_LP_provUrbanas$rho_LP <- (df_LP_provUrbanas$P_deff[1] - 1) /  (df_LP_provUrbanas$promhogXupm - 1)
+df_LP_provUrbanas
+```
+
+El número de viviendas en la parte urbana:
+```{r}
+df_LP_provUrbanas$nvivXUPM <- 6
+```
+
+
+Ya con los insumos podemos proceder a calcular el tamaño de muestra para estas regiones:
+
+```{r}
+ls_tamMue_provUrbanas <- vector(mode = "list", length = nrow(df_LP_provUrbanas))
+# Calculo por área
+for(i in 1:nrow(df_LP_provUrbanas)){
+temp1 <- ss4HHSp(N = df_LP_provUrbanas$N[i] , 
+        M = df_LP_provUrbanas$M[i], 
+        r = 1, b = 1, 
+        rho = df_LP_provUrbanas$rho_LP[i], P = df_LP_provUrbanas$P[i], # Ver df_LP_area y tomar urbana 
+        delta = df_LP_provUrbanas$mer_deseado[i], conf = 0.95, m = df_LP_provUrbanas$nvivXUPM[i]) %>%
+  mutate(prov  = df_LP_provUrbanas$prov[i]) %>% ungroup() 
+ls_tamMue_provUrbanas[[i]] <- temp1
+}
+df_tamMue_provUrbanas <- bind_rows(ls_tamMue_provUrbanas)
+```
+
+Agregamos por región estas provincias:
+
+```{r}
+df_tamMue_provUrbanas <- df_tamMue_provUrbanas %>% select(prov, PSUinSample, HouseholdsInSample)
+df_tamMue_provUrbanas
+```
+
+
+
+
+# Tamaño de muestras provincias mixtas
+
+Las provincias 10 a la 12, la 05 y la 07 que son practicamente rurales se trabajrá con 12 encuestas. 
+Para la provincias 08 se le trabajarán con 6 encuestas. Para las otras provincias requerimos estimar la proporción
+agregada por región y área para las otras provincias:
+
+
+```{r}
+df_LP_provArea <- diseno_muestral %>% filter(prov %in% c("01", "02", "03", "04", "06", "08", "09")) %>% 
+              group_by(prov, AREA) %>%
+              summarize(P = survey_mean(LP, na.rm = T, 
+                        vartype  = "se", deff = T)) 
+```
+
+Estos insumos serán relevantes para calcular las tablas de muestreo, logicamente los niveles de precisión a este doble nivel de precisión, por ejemplo se podría fijar un margen de error de 0.05:
+
+```{r}
+df_LP_provArea$me_deseado <- 0.05
+
+df_LP_provArea$LI_deseado <- df_LP_provArea$P - df_LP_provArea$me_deseado
+df_LP_provArea$LS_deseado <- df_LP_provArea$P + df_LP_provArea$me_deseado
+df_LP_provArea$mer_deseado <- (df_LP_provArea$me_deseado) / df_LP_provArea$P
+df_LP_provArea$nvivXUPM <- ifelse(df_LP_provArea$AREA == "Urbana", 6, 12)
+df_LP_provArea$prov_area <- paste0(df_LP_provArea$prov, "_", df_LP_provArea$AREA)
+df_LP_provArea
+```
+
+Se requiere estimar el tamaño de población y el número de UPM para cada combinación urbano y rural
+
+
+```{r}
+consulta_N_provArea <- df_marco %>% filter(prov_id %in% c("01", "02", "03", "04", "06", "08", "09")) %>% 
+  group_by(prov_id, area) %>% 
+  summarise(N = sum(c10ht)) %>% ungroup() %>%
+              mutate(area_recod = ifelse(area %in% c("02", "03"), "Rural", "Urbana")) %>%
+  group_by(prov_id , area_recod) %>% summarise(N = sum(N))
+consulta_N_provArea$prov_area <- paste0(consulta_N_provArea$prov_id, "_", consulta_N_provArea$area_recod)
+consulta_N_provArea <- consulta_N_provArea %>% ungroup() %>% select(prov_area, N)
+
+
+consulta_M_provArea <- df_marco %>% filter(prov_id %in% c("01", "02", "03", "04", "06", "08", "09")) %>% 
+  group_by(prov_id, area) %>% 
+  summarise(M = n_distinct(llave_con)) %>% ungroup() %>%
+              mutate(area_recod = ifelse(area %in% c("02", "03"), "Rural", "Urbana")) %>%
+  group_by(prov_id , area_recod) %>% summarise(M = sum(M))
+consulta_M_provArea$prov_area <- paste0(consulta_M_provArea$prov_id, "_", consulta_M_provArea$area_recod) 
+consulta_M_provArea <- consulta_M_provArea %>% ungroup() %>% select(prov_area, M)
+
+df_LP_provArea <- df_LP_provArea %>% left_join(consulta_N_provArea, by = "prov_area")
+df_LP_provArea <- df_LP_provArea %>% left_join(consulta_M_provArea, by = "prov_area")
+```
+
+También se requiere traerse la correlación intraclásica:
+
+
+```{r}
+consulta_numVivXUpm_provArea <- DF_HOGAR %>% 
+  group_by(UPM, cuest, AREA, prov) %>% 
+  count(name = "temp") %>% ungroup() %>%
+  group_by(AREA, prov, UPM) %>%
+  count() %>% 
+  ungroup() %>% 
+  group_by(AREA, prov) %>%
+  summarise(promhogXupm = mean(n))
+consulta_numVivXUpm_provArea$prov_area <- paste0(consulta_numVivXUpm_provArea$prov, "_", 
+                                                 consulta_numVivXUpm_provArea$AREA) 
+consulta_numVivXUpm_provArea <- consulta_numVivXUpm_provArea %>%  ungroup() %>% select(prov_area, promhogXupm)
+
+df_LP_provArea <- df_LP_provArea %>% 
+  left_join(consulta_numVivXUpm_provArea, by = "prov_area")
+
+df_LP_provArea$rho_LP <- (df_LP_provArea$P_deff[1] - 1) /  (df_LP_provArea$promhogXupm - 1)
+```
+
+
+Podemos calcular un ciclo para calcular el tamaño de muestra para estas regiones y área:
+
+```{r}
+ls_tamMue_provArea <- vector(mode = "list", length = nrow(df_LP_provArea))
+# Calculo por área
+for(i in 1:nrow(df_LP_provArea)){
+temp1 <- ss4HHSp(N = df_LP_provArea$N[i] , 
+        M = df_LP_provArea$M[i], 
+        r = 1, b = 1, 
+        rho = df_LP_provArea$rho_LP[i], P = df_LP_provArea$P[i], # Ver df_LP_area y tomar urbana 
+        delta = df_LP_provArea$mer_deseado[i], conf = 0.95, m = df_LP_provArea$nvivXUPM[i]) %>%
+  mutate(prov  =df_LP_provArea$prov[i],  AREA = df_LP_provArea$AREA[i]) %>% ungroup() 
+ls_tamMue_provArea[[i]] <- temp1
+}
+df_tamMue_provArea <- bind_rows(ls_tamMue_provArea)
+```
+
+Agregamos por región estas provincias:
+
+```{r}
+df_tamMue_provMixtas <- df_tamMue_provArea %>% group_by(prov) %>% summarise(PSUinSample  = sum(PSUinSample),
+                                                       HouseholdsInSample  = sum(HouseholdsInSample ))
+```
+
+
+
+
+# Orquestación tamaño de muestra
+
+Unificamos el tamaño de muestra para cada una de las regiones:
+
+```{r}
+df_tamMue_prov  <- bind_rows(df_tamMue_provUrbanas, df_tamMue_provRurales, df_tamMue_provMixtas) %>%
+  arrange(prov)
+```
+
+```{r}
+sum(df_tamMue_prov$HouseholdsInSample)
+```
+
+
+
