@@ -1,0 +1,687 @@
+---
+title: "IPM"
+author: "José Fernando Zea"
+date: "2023-10-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(dplyr) # Procesamiento de datos
+library(readr) # Exportar de csv
+library(readxl) # Exportar de excel
+library(haven) # Exportar de SPSS
+library(janitor) # Limieza de nombres
+library(samplesize4surveys) # Cálculo de tablas de muestreo
+library(srvyr) # Definición del diseño muestral survey
+```
+
+
+# Lectura de encuesta de propósitos múltiples
+
+Leemos la tabla de propositos múltiples
+```{r}
+vivienda <- read.dbf("data/vivienda.dbf")
+hogar <- read.dbf("data/hogar.dbf")
+poblacion <- read.dbf("data/poblacio.dbf")
+```
+
+https://www.mppn.org/es/paises_participantes/panama/
+
+
+Eliminamos los duplicados de hogares y viviendas, primero revisamos los duplicados
+
+
+```{r}
+#table(vivienda$LLAVE_SEC %>% duplicated())
+```
+
+```{r}
+table(paste0(hogar$LLAVE_SEC, "_", hogar$HOGAR_NO) %>% duplicated)
+```
+
+
+```{r}
+table(paste0(poblacion$LLAVE_SEC, "_", poblacion$HOGAR, "_",
+             poblacion$NPER) %>% duplicated())
+```
+
+
+# Lectura del marco poblacional
+
+Leemos los factores de expansión de la encuesta de mercado en el hogar:
+
+```{r}
+df_fexp <- read_excel("data/Cobertura practica factores de expansión.xlsx",    
+                      sheet = "data")
+df_fexp <- clean_names(df_fexp)
+```
+
+
+Leemos el marco poblacional:
+
+```{r}
+df_marco <- read_excel("data/Marco de UPM y Segmentos_EML_PM.xlsx", 
+                       sheet = "N-UPM-21,747 UNIFICADA")
+```
+
+Le agregamos el estrato a la tabla de los factores de expansión:
+
+```{r}
+consulta_estrato <- df_fexp %>% mutate(provincia_fexp = substr(clave_de_upm, 1, 2)) %>% 
+  group_by(provincia_fexp, estrato, viviendas_particulares_del_dominio_censo_2010) %>%
+  count() %>% 
+  arrange(provincia_fexp, estrato) %>%
+  ungroup() %>% 
+  mutate(estrato_upm = 1:n()) %>% 
+  select(-n)
+```
+
+Integramos la tabla del factor de expansión con el estrato:
+
+```{r}
+df_fexp <- df_fexp %>% left_join(consulta_estrato, 
+          by = c("estrato", "viviendas_particulares_del_dominio_censo_2010"))
+```
+
+Área urbana y rural: 
+
+```{r}
+table(poblacion$AREA)
+```
+
+
+
+# Calculo de insumos tablas de muestreo provenientes del marco poblacional
+
+Calculamos los insumos necesarios del marco para poder calcular los tamaños de muestra, estos son 4 parámetros a nivel Nacional, por dominio y a nivel nacional:
+
+- Tamaño poblacional (N)
+- Número de UPMs (M)
+- Promedio de personas por hogar
+
+
+```{r}
+consulta_N_dominios <- df_marco %>% group_by(prov_id, prov) %>% 
+                       summarise(N = sum(c10ht)
+)
+consulta_N_nacional <- data.frame(prov_id = "00", 
+                                  prov = "NACIONAL", 
+                                  N = sum(df_marco$c10ht))
+consulta_N_dominios <- rbind(consulta_N_nacional, consulta_N_dominios)
+```
+
+censo: 3.662.000 me da 3.351.434
+
+
+
+Calculamos el número de UPM por dominio:
+
+```{r}
+consulta_M_dominios <- df_marco %>% 
+  group_by(prov_id, prov) %>% 
+  summarise(M = n_distinct(llave_con)
+)
+# unique(df_marco$llave_con) %>% length()
+consulta_M_nacional <- data.frame(prov_id = "00",
+                                  prov = "NACIONAL", 
+                                  M = sum(consulta_M_dominios$M))
+consulta_M_dominios <- rbind(consulta_M_nacional, consulta_M_dominios)
+```
+
+
+Calculamos estos parámetros por área:
+
+```{r}
+consulta_N_area <- df_marco %>% group_by(area) %>% 
+                       summarise(N = sum(c10ht)
+)
+consulta_N_nacional2 <- data.frame(area = "00", 
+                                  N = sum(df_marco$c10ht))
+consulta_N_area <- rbind(consulta_N_nacional2, consulta_N_area)
+```
+
+
+```{r}
+consulta_M_area <- df_marco %>% 
+  group_by(area) %>% 
+  summarise(M = n_distinct(llave_con)
+)
+# unique(df_marco$llave_con) %>% length()
+consulta_M_nacional2 <- data.frame(area = "00", 
+                                  M = sum(consulta_M_area$M))
+
+consulta_M_area <- rbind(consulta_M_nacional2, 
+                                  consulta_M_area)
+```
+
+
+
+
+
+# Dimensión educación
+
+
+La edad se distribuye como sigue:
+
+```{r}
+summary(poblacion$P3)
+```
+
+
+# Inasistencia escolar
+
+```{r}
+table(poblacion$P5, useNA = "a")
+```
+
+```{r}
+df_privacion_inasistenciaEscolar <- poblacion %>% 
+  mutate(carencia_inasistencia_escolar = ifelse(P3 >= 4 & P3 <= 17 & 
+                                                  P5 == 2, 1, 0)) %>%
+  select(LLAVE_SEC, HOGAR, NPER, carencia_inasistencia_escolar) %>% ungroup() %>%
+  group_by(LLAVE_SEC, HOGAR) %>%
+  summarise(carencia_inasistencia_escolar = sum(carencia_inasistencia_escolar)) %>%
+  ungroup() %>%
+  mutate(carencia_inasistencia_escolar = as.numeric(carencia_inasistencia_escolar >= 1))
+
+```
+```{r}
+table(df_privacion_inasistenciaEscolar$carencia_inasistencia_escolar)
+proportions(table(df_privacion_inasistenciaEscolar$carencia_inasistencia_escolar)) * 100
+```
+
+
+# Logro educativo
+
+- Personas entre 18 y 30 años no cuentan con educación pre-media completa (9 años)
+- Personas de 31 a 59 años no cuentan con educación primaria completa (6 años)
+- Personas de 60 o más que no saben leer o escribir
+
+```{r}
+df_carencia_logroEducativo <- poblacion %>% 
+  mutate(carencia_logroEducativo = ifelse(P3 >= 18 & P3 <= 30 & 
+                                                    as.numeric(P6)  <  33, 1, 
+             ifelse(P3 >= 31 & P3 <= 59 & as.numeric(P6)  <  16, 1,
+                    ifelse(P3 > 60 & P7 == 2, 1, 
+                           ifelse(P3 >= 18, 0, NA))))) %>% 
+ select(LLAVE_SEC, HOGAR, NPER, carencia_logroEducativo) %>% ungroup() %>%
+  group_by(LLAVE_SEC, HOGAR) %>%
+  summarise(carencia_logroEducativo = sum(carencia_logroEducativo, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(carencia_logroEducativo = as.numeric(carencia_logroEducativo >= 1))
+```
+
+```{r}
+table(df_carencia_logroEducativo$carencia_logroEducativo, useNA = "a")            
+table(df_carencia_logroEducativo$carencia_logroEducativo, useNA = "a") %>% prop.table()            
+
+```
+
+
+# Dimensión vivienda
+
+## Carencia material de la vivienda
+
+* Si en el area urbana la casa cuenta con materiales precarios o sin paredes o si el material
+de techos o pisos es precario
+
+* En rural cambia las categorías y en comarca Guna Yala (provincia 10)
+
+
+```{r}
+cat("material de paredes")
+vivienda$V1D_MATERI %>% table()
+cat("material de techo")
+vivienda$V1E_MATERI
+cat("material de pisos")  %>% table()
+vivienda$V1F_MATERI  %>% table()
+```
+
+
+
+```{r}
+df_carencia_materialVivienda <- vivienda %>%
+  mutate(carencia_material_viviendas = 
+           ifelse(AREA == 1  & PROVINCIA != "10" &
+                  (V1D_MATERI %in% 2:7 | V1E_MATERI %in% 5:7 | V1F_MATERI %in% 4:6), 1,
+                  ifelse(AREA == 2 &  PROVINCIA != "10" &
+                         (V1D_MATERI %in% 4:7 | V1E_MATERI %in% 5:7 | V1F_MATERI %in% 5:6), 1,
+                         ifelse(PROVINCIA == "10" &
+                                (V1D_MATERI %in% 4:7 | V1E_MATERI %in% c(5, 7) | V1F_MATERI %in% 5:6), 1,  0)
+                  )
+           )
+         ) %>% 
+  select(LLAVE_SEC, carencia_material_viviendas) %>% 
+  ungroup()
+
+```
+
+
+```{r}
+table(df_carencia_materialVivienda$carencia_material_viviendas)
+```
+
+
+## Carencia habitación
+
+Número de personas:
+```{r}
+table(vivienda$V1H_DORMIT)
+```
+
+```{r}
+table(hogar$TOT_PER)
+
+```
+
+Integramos las dos tablas para el calculo:
+
+```{r}
+df_carencia_Hacinamiento <- hogar %>% select(LLAVE_SEC, HOGAR_NO, TOT_PER) %>%
+  left_join(vivienda %>% select(LLAVE_SEC, V1H_DORMIT), by = "LLAVE_SEC")
+```
+
+Calculamos la carencia por hacinamiento:
+
+```{r}
+df_carencia_Hacinamiento <- df_carencia_Hacinamiento %>% 
+  mutate(V1H_DORMIT = ifelse(V1H_DORMIT == 0, 1, V1H_DORMIT),
+        hacinamiento = TOT_PER / V1H_DORMIT,
+        carencia_hacinamiento = ifelse(hacinamiento >= 3, 1, 0)) %>%
+  select(LLAVE_SEC,  carencia_hacinamiento)
+```
+
+
+```{r}
+table(df_carencia_Hacinamiento$carencia_hacinamiento, useNA = "a")
+```
+
+
+
+## Carencia de electricidad
+
+```{r}
+table(vivienda$V1O_LUZ, useNA = "a")
+```
+
+```{r}
+df_carencia_Electricidad <- vivienda %>% mutate(carencia_electricidad = 
+                                  ifelse(V1O_LUZ %in% c(4, 5, 6, 8), 1, 0)) %>%
+  select(LLAVE_SEC,  carencia_electricidad)
+```
+
+
+```{r}
+table(df_carencia_Electricidad$carencia_electricidad) 
+```
+
+
+# Entorno saneamiento
+
+
+## Manejo de basuras
+```{r}
+table(vivienda$V1M_BASURA, useNA = "a")
+```
+
+
+```{r}
+df_carencia_basura <- vivienda %>% mutate(carencia_basura = 
+                                  ifelse(AREA == 1 & V1M_BASURA %in% c(3:6, 7), 1,
+                                    ifelse(AREA == 2 & V1M_BASURA %in% c(3,4,6,7), 1, 0))) %>%
+  select(LLAVE_SEC,  carencia_basura)
+
+table(df_carencia_basura$carencia_basura) %>% prop.table()
+```
+
+
+
+## Saneamiento
+
+```{r}
+table(vivienda$V1K_SERVIC)
+```
+
+Exclusividad de sanitario
+
+```{r}
+table(vivienda$V1L_USO_SA)
+
+```
+
+
+```{r}
+df_carencia_saneamientoMejorado <- vivienda %>% mutate(carencia_saneamientoMejorado = 
+                ifelse(AREA == 1 & 
+                         V1K_SERVIC %in% c(1, 4)  |
+                         (V1K_SERVIC %in% 2:3 &  V1L_USO_SA == 2), 1,
+                ifelse(AREA == 2 & 
+                       (V1K_SERVIC == 1 & V1L_USO_SA == 2)  |
+                      V1K_SERVIC == 4 |
+                        (V1K_SERVIC %in% 2:3 &  V1L_USO_SA == 2), 1, 0))) %>%
+  select(LLAVE_SEC,  carencia_saneamientoMejorado)
+                
+table(df_carencia_saneamientoMejorado$carencia_saneamientoMejorado)
+```
+
+# Trabajo
+
+## Desempleo
+
+```{r}
+table(poblacion$OCU_DES)
+```
+    
+```{r}
+table(poblacion$P31, useNA = "a") # Trabajador familar 10
+```
+
+```{r}
+table(poblacion$PEA_NEA)
+```
+Disponible para trabajar
+```{r}
+table(poblacion$P22B)
+```
+
+
+```{r}
+df_carencia_desempleo <- poblacion %>% mutate(carencia_desempleo = ifelse(P3 > 18 & 
+    (
+      OCU_DES == "Desocupados" |
+    (OCU_DES == "Ocupados" & P31 == 10) |
+    (PEA_NEA == "NEA" & P22B == 1) 
+    ), 1,
+    ifelse(OCU_DES == "Ocupados" & P31 != 10, 0, NA))) %>% 
+ select(LLAVE_SEC, HOGAR, NPER, carencia_desempleo) %>% ungroup() %>%
+  group_by(LLAVE_SEC, HOGAR) %>%
+  summarise(carencia_desempleo = sum(carencia_desempleo, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(carencia_desempleo = as.numeric(carencia_desempleo >= 1))
+```
+
+
+```{r}
+table(df_carencia_desempleo$carencia_desempleo, useNA = "a")
+```
+
+
+
+
+## Precariedad trabajo
+
+Listamos las variables relevantes para el análisis que tiene las siguientes reglas lógicas:                                                                                                                 
+Si al menos un miembro de 18 años o más edad y:
+- Está ocupado como empleado, empleado doméstico o trabajador por cuenta propio (pero no gerentes, administradores o profesionales) y sin seguro social
+- Trabajador por cuenta propia en agricultura sin ingreso independiente
+- Producen para autoconsumo y no venden nada
+
+* No privados (carencia)
+Mayores de 18 años o más:
+- Patrones no son privados.
+- Está ocupado como (empleado, empleado doméstico y trabajador por cuenta propia) paga seguro social 
+- Es trabajador por cuenta propio que es gerente, adminstrador o profesional
+- Trabajador por cuenta propia en agricultura con ingreso independiente
+- Producen para autoconsumo y vende algo
+
+Variable ocupados y desocupados:
+
+```{r}
+table(poblacion$OCU_DES, useNA = "a")
+```
+
+
+
+```{r}
+table(poblacion$P31)
+```
+
+1: Empleado del gobierno
+2: Empleado de una organización sin animo de lucro
+3: Empleado de una cooperativa
+4: Empleado de una empresa privada
+5: Empleado de servicio doméstico
+6: Empleado de la comisión del canal o sitios de defensas
+7. Por su cuenta propia o independiente
+8. Patrón (dueño)
+9. Miembro de una cooperativa de producción
+10. Trabajador familiar
+
+
+
+Otra variable de interés para el cálculo de este indicador es:
+P26: ¿QUÉ OCUPACIÓN, OFICIO O TRABAJO REALIZÓ LA SEMANA PASADA O A LA ÚLTIMA VEZ QUE TRABAJÓ?
+
+01. Directores y gerentes de los sectores público, privado y de organizaciones de interés social
+02. Profesionales, científicos e intelectuales
+03. Técnicos y profesionales de nivel medio
+04. Empleados de oficina
+05. Trabajadores de los servicios y vendedores de comercios y mercados
+06. Agricultores y trabajadores agropecuarios, forestales, de la pesca y caza
+07. Artesanos y trabajadores de la minería, la construcción, la industria manufacturera, la mecánica y ocupaciones afines
+08. Operadores de instalaciones fijas y máquinas; ensambladores, conductores y operadores de maquinarias móviles
+09. Trabajadores no calificados de los servicios, la minería, construcción, industria manufacturera, transporte y otras ocupaciones elementales
+
+```{r}
+table(poblacion$P26RECO)
+```
+
+Otra variable relevante es la tenencia de seguro social:
+
+```{r}
+poblacion$P4 %>% table()
+```
+1. Asegurado directo ?
+2. Beneficiario?..
+3. Jubilado?..
+4. Pensionado?.
+5. Jubilado o pensionado de otro país?.......
+6. No tiene?.............
+
+
+Variable P72M: si no tiene ningún ingreso toma el valor 1.
+
+Variable P365_AUTOC: valor autoconsumo
+
+Si al menos un miembro de 18 años (P3) o más edad y:
+- Está ocupado como empleado, empleado doméstico  sin seguro social
+- Está ocupado como empleado como trabajador por cuenta propio (pero no gerentes, administradores o profesionales) y sin seguro social
+- Trabajador por cuenta propia en agricultura sin ingreso independiente
+- Producen para autoconsumo (P365  > 0) y no venden nada
+
+* No privados (carencia)
+Mayores de 18 años o más:
+- Patrones no son privados.
+- Está ocupado como (empleado, empleado doméstico y trabajador por cuenta propia) paga seguro social 
+- Es trabajador por cuenta propio que es gerente, adminstrador o profesional
+- Trabajador por cuenta propia en agricultura con ingreso independiente
+- Producen para autoconsumo y vende algo
+
+```{r}
+df_carencia_precariedadTrabajo <- poblacion %>% 
+                             select(LLAVE_SEC, HOGAR, NPER,
+                                   OCU_DES, P3, P4,
+                             P26RECO, P31, P72M, P365)
+
+#df_carencia_precariedadTrabajo 
+df_carencia_precariedadTrabajo <- df_carencia_precariedadTrabajo %>% 
+  mutate(carencia_precariedadTrabajo = 
+  ifelse(P3 >= 18 & OCU_DES =="Ocupado" & P31 %in% c(1:6) & P4 ==  6, 1, 
+    ifelse(P3 >= 18 & OCU_DES =="Ocupado" & P31 == 7 &
+             !(P26RECO %in%  c("01", "02", "03")) & P4 ==  6, 1,
+            ifelse(P3 >= 18 & P31 == 7 & P26RECO == "06" & P72M == 1, 1, 
+                   # Trabajador cuenta propio, agricultura sin ingreso
+            ifelse(P3 >= 18 & P365  >  0 & P72M == 1, 1,  NA)))))
+            
+  #           
+  #                  # Ingreso autocomsumo
+  #          ifelse(P3 >= 18 & P31 == 8, 0,
+  #              ifelse(P3 >= 18 & OCU_DES =="Ocupado" & P31 %in% c(1:6) & P4 !=  6, 0,
+  #               ifelse(P3 >= 18 & OCU_DES =="Ocupado" & P31 == 7 &
+  #            P26RECO %in%  c("01", "02", "03"), 0,
+  #            ifelse(P3 >= 18 & P31 == 7 & P26RECO == "06" & P72M != 1, 0, 
+  #                   # Trabajador cuenta propio, agricultura con ingreso
+  #           ifelse(P3 >= 18 & P365  >  0 & P72M != 1, 0, NA)))))))))
+  # )
+                   
+                   
+```
+
+
+```{r}
+df_carencia_precariedadTrabajo <- df_carencia_precariedadTrabajo %>% 
+ select(LLAVE_SEC, HOGAR, NPER, carencia_precariedadTrabajo) %>% ungroup() %>%
+  group_by(LLAVE_SEC, HOGAR) %>%
+  summarise(carencia_precariedadTrabajo = 
+              sum(carencia_precariedadTrabajo, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(carencia_precariedadTrabajo = as.numeric(carencia_precariedadTrabajo >= 1))
+```
+```{r}
+table(df_carencia_precariedadTrabajo$carencia_precariedadTrabajo) 
+table(df_carencia_precariedadTrabajo$carencia_precariedadTrabajo) %>% prop.table()
+
+```
+
+
+
+# Dimensión salud
+
+De la categoría 4 a la 11 hay privación:
+
+```{r}
+table(vivienda$V1I_AGUA_B, useNA = "a")
+```
+
+Dias que recibe agua durante estacións seca
+
+```{r}
+table(vivienda$V1J1A_DIAS, useNA = "a")
+```
+
+Días que recibe agua durante la estación lluviosa:
+```{r}
+table(vivienda$V1J1B_DIAS, useNA = "a")
+```
+
+
+```{r}
+df_carencia_privacionAgua <- vivienda %>% mutate(carencia_agua = 
+                                  ifelse(V1I_AGUA_B %in% 2:11 |
+                                    (V1I_AGUA_B == 1 & 
+                                       (V1J1A_DIAS < 7 | V1J1B_DIAS < 7 |
+                                       V1J1A_HORA < 12 | V1J1B_HORA < 12)),1,0)) %>%
+  select(LLAVE_SEC, carencia_agua)
+```
+
+
+```{r}
+table(df_carencia_privacionAgua$carencia_agua)
+table(df_carencia_privacionAgua$carencia_agua) %>% prop.table()
+
+```
+
+
+Integrar todas las carencias
+
+
+```{r}
+nrow(df_privacion_inasistenciaEscolar)
+nrow(df_carencia_logroEducativo)
+nrow(df_carencia_materialVivienda)
+nrow(df_carencia_Hacinamiento)
+nrow(df_carencia_Electricidad)
+nrow(df_carencia_basura)
+nrow(df_carencia_saneamientoMejorado)
+nrow(df_carencia_desempleo)
+nrow(df_carencia_privacionAgua)
+nrow(df_carencia_precariedadTrabajo)
+```
+
+
+Integramos en solo dataset:
+
+```{r}
+df_privaciones <- full_join(df_privacion_inasistenciaEscolar, 
+                            df_carencia_logroEducativo)
+df_privaciones <- full_join(df_privaciones, df_carencia_materialVivienda)
+df_privaciones <- full_join(df_privaciones, df_carencia_Hacinamiento)
+df_privaciones <- full_join(df_privaciones, df_carencia_Electricidad)
+df_privaciones <- full_join(df_privaciones, df_carencia_basura)
+df_privaciones <- full_join(df_privaciones, df_carencia_saneamientoMejorado)
+df_privaciones <- full_join(df_privaciones, df_carencia_desempleo)
+df_privaciones <- full_join(df_privaciones, df_carencia_precariedadTrabajo)
+df_privaciones <- full_join(df_privaciones, df_carencia_privacionAgua)
+```
+
+
+```{r}
+summary(df_privaciones)
+```
+
+
+
+
+```{r}
+df_privaciones <- df_privaciones %>% mutate(IPM = 0.1 * carencia_inasistencia_escolar +
+                    0.1 * carencia_logroEducativo +
+  (0.2 / 3) * carencia_material_viviendas + (0.2 / 3) * carencia_hacinamiento +
+  (0.2 / 3) * carencia_electricidad +
+  0.1 * carencia_basura + 0.1 * carencia_saneamientoMejorado +
+  0.1 * carencia_desempleo + 0.1 * carencia_precariedadTrabajo + 
+  0.2 * carencia_agua   
+                      )
+```
+
+
+Agregamos área, dominios, factor de expansión, para analizar el IPM:
+
+
+# Cálculo del diseño muestral
+
+
+```{r}
+hogar_varsel <- hogar %>% select(LLAVE_SEC, HOGAR = HOGAR_NO, PROV, 
+                                 AREA, FAC15_E)
+df_privaciones2 <- df_privaciones %>% left_join(hogar_varsel,
+                                                by = c("LLAVE_SEC", "HOGAR"))
+```
+
+
+
+Análisis descriptivo: 
+
+```{r}
+sum(df_privaciones2$FAC15_E * df_privaciones2$IPM ) / sum(df_privaciones2$FAC15_E)
+```
+
+IPM por área:
+
+```{r}
+
+consulta_IPM_area <- df_privaciones2 %>% group_by(AREA) %>%
+  summarise(prom_ipm = weighted.mean(IPM, FAC15_E))
+consulta_IPM_area
+```
+
+
+IPM por provincia:
+
+```{r}
+consulta_IPM_provincia <- df_privaciones2 %>% group_by(PROV) %>%
+  summarise(prom_ipm = weighted.mean(IPM, FAC15_E))
+```
+
+
+
+No tenemos insumos para calcular el tamaño de muestra:
+
+df_eml_2021oct$UPM <- paste0(df_eml_2021oct$prov, df_eml_2021oct$dist, 
+                              df_eml_2021oct$corre,
+                              df_eml_2021oct$estra, df_eml_2021oct$unidad)
